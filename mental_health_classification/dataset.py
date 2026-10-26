@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import NamedTuple
 
 from loguru import logger
 import numpy as np
@@ -20,8 +21,17 @@ from mental_health_classification.config import (
 
 app = typer.Typer()
 
-_label_encoder: LabelEncoder | None = None  # reused for class names in report()
-_scaler: StandardScaler | None = None  # reused for inference on raw (unscaled) features
+_scaler: StandardScaler | None = None  # kept for predict.save_model()/inference on raw features
+
+
+class Splits(NamedTuple):
+    Xtr: torch.Tensor
+    ytr: torch.Tensor
+    Xval: torch.Tensor
+    yval: torch.Tensor
+    Xte: torch.Tensor
+    yte: torch.Tensor
+    classes: list
 
 
 def resolve_csv(csv_path: Path | str | None = None) -> Path:
@@ -38,32 +48,19 @@ def resolve_csv(csv_path: Path | str | None = None) -> Path:
 
 
 def load_data(
-    csv_path: Path | str | None = None,
+    df,
     test_size=0.15,
     val_size=0.15,
     random_state=SEED,
 ):
-    """Reload the CSV -> return 6 tensors: (Xtr, ytr, Xval, yval, Xte, yte).
+    """Encode labels, split 70/15/15, standardize (fit on train only), return Splits."""
+    global _scaler
 
-    Steps (mirrors notebook section 9):
-      a. Encode text labels -> integers 0..9
-      b. Stratified 70% train / 15% val / 15% test split
-      c. Standardize features (scaler fit on TRAIN only)
-      d. Convert to float32 / long tensors
-    """
-    global _label_encoder, _scaler
+    X_raw = df[FEATURES].to_numpy(dtype=np.float32)
+    encoder = LabelEncoder()
+    y_encoded = encoder.fit_transform(df[TARGET])
 
-    path = resolve_csv(csv_path)
-    data = pd.read_csv(path, low_memory=False)
-    X_raw = data[FEATURES].to_numpy(dtype=np.float32)
-    y_raw = data[TARGET].to_numpy()
-
-    # a. Encode text labels -> integers 0..9
-    _label_encoder = LabelEncoder()
-    y_encoded = _label_encoder.fit_transform(y_raw)
-    logger.info(f"Daftar kelas: {list(_label_encoder.classes_)}")
-
-    # b1. Split off the test set first (15% of total)
+    # Split off the test set first, then carve validation out of the remainder
     X_rest, X_te, y_rest, y_te = train_test_split(
         X_raw,
         y_encoded,
@@ -71,8 +68,7 @@ def load_data(
         random_state=random_state,
         stratify=y_encoded,
     )
-    # b2. Split validation from the remainder (15% of total)
-    val_rel = val_size / (1 - test_size)
+    val_rel = val_size / (1 - test_size)  # validation share relative to the remainder
     X_tr, X_val, y_tr, y_val = train_test_split(
         X_rest,
         y_rest,
@@ -80,23 +76,19 @@ def load_data(
         random_state=random_state,
         stratify=y_rest,
     )
-    logger.info(f"Bagi data -> latih {len(X_tr)}, validasi {len(X_val)}, uji {len(X_te)}")
 
-    # c. Scaling (fit on train only!)
     scaler = StandardScaler()
     X_tr = scaler.fit_transform(X_tr).astype(np.float32)
     X_val = scaler.transform(X_val).astype(np.float32)
     X_te = scaler.transform(X_te).astype(np.float32)
     _scaler = scaler  # kept for predict.save_model()/inference on raw features
 
-    # d. To PyTorch tensors
-    return (
-        torch.from_numpy(X_tr),
-        torch.from_numpy(y_tr).long(),
-        torch.from_numpy(X_val),
-        torch.from_numpy(y_val).long(),
-        torch.from_numpy(X_te),
-        torch.from_numpy(y_te).long(),
+    print(f"Bagi data -> latih {len(X_tr)}, validasi {len(X_val)}, uji {len(X_te)}")
+    return Splits(
+        torch.from_numpy(X_tr), torch.from_numpy(y_tr).long(),
+        torch.from_numpy(X_val), torch.from_numpy(y_val).long(),
+        torch.from_numpy(X_te), torch.from_numpy(y_te).long(),
+        list(encoder.classes_),
     )
 
 
@@ -106,13 +98,13 @@ def main(
 ):
     """Load + split the raw CSV and log the resulting tensor shapes."""
     logger.info("Processing dataset...")
-    # tqdm placeholder retained from template for CLI parity; real work below.
     for i in tqdm(range(1), total=1):
         if i == 5:  # pragma: no cover - kept for template parity
             logger.info("Something happened for iteration 5.")
-    Xtr, ytr, Xval, yval, Xte, yte = load_data(csv_path=input_path)
+    df = pd.read_csv(resolve_csv(input_path), low_memory=False)
+    data = load_data(df)
     logger.info(
-        f"Latih: {tuple(Xtr.shape)}, validasi: {tuple(Xval.shape)}, uji: {tuple(Xte.shape)}"
+        f"Latih: {tuple(data.Xtr.shape)}, validasi: {tuple(data.Xval.shape)}, uji: {tuple(data.Xte.shape)}"
     )
     logger.success("Processing dataset complete.")
 

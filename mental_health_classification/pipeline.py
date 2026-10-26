@@ -16,7 +16,6 @@ import typer
 
 from mental_health_classification import dataset as dataset_mod
 from mental_health_classification.config import (
-    CSV_FILENAME,
     FIGURES_DIR,
     HYPERPARAMS,
     MODELS_DIR,
@@ -25,10 +24,10 @@ from mental_health_classification.config import (
     SEED,
     TARGET,
 )
-from mental_health_classification.dataset import load_data
+from mental_health_classification.dataset import load_data, resolve_csv
 from mental_health_classification.modeling.optimizers import make_adam
-from mental_health_classification.modeling.predict import report, save_model
-from mental_health_classification.modeling.train import OPTIMIZERS, fit_status, train, train_epochs
+from mental_health_classification.modeling.predict import metric_summary, predict, report, save_model
+from mental_health_classification.modeling.train import OPTIMIZERS, fit_status, train
 from mental_health_classification.plots import (
     plot_correlation,
     plot_feature_histograms,
@@ -46,7 +45,7 @@ def main(
         True, help="Buat grafik EDA (distribusi label, histogram, korelasi)."
     ),
     adam_curve: bool = typer.Option(
-        True, help="Latih 1 model Adam (300 step) + kurva loss validasi (section 16)."
+        True, help="Latih 1 model Adam + simpan kurva loss validasi (section 16)."
     ),
     report_optimizer: str = typer.Option(
         "Adam", help="Optimizer untuk laporan per kelas + confusion matrix (section 19-20)."
@@ -54,54 +53,61 @@ def main(
 ):
     """Jalankan alur notebook end-to-end dan simpan gambar/tabel/model."""
     logger.info("Menyiapkan data (load_data)...")
-    data = load_data()
-    Xval, yval, Xte, yte = data[2], data[3], data[4], data[5]
+    df = pd.read_csv(resolve_csv(), low_memory=False)
+    data = load_data(df)
+    Xval, yval, Xte, yte = data.Xval, data.yval, data.Xte, data.yte
 
     # --- EDA (sections 7-8) straight from the raw CSV -------------------------
     if eda:
-        raw = pd.read_csv(RAW_DATA_DIR / CSV_FILENAME, low_memory=False)
-        plot_label_distribution(raw[TARGET], FIGURES_DIR / "distribusi_label.png")
-        plot_feature_histograms(raw, FIGURES_DIR / "distribusi_fitur.png")
-        plot_correlation(raw, FIGURES_DIR / "korelasi_fitur.png")
+        plot_label_distribution(df[TARGET], FIGURES_DIR / "distribusi_label.png")
+        plot_feature_histograms(df, FIGURES_DIR / "distribusi_fitur.png")
+        plot_correlation(df, FIGURES_DIR / "korelasi_fitur.png")
 
     # --- 1x Adam + validation-loss curve (section 16) -------------------------
     if adam_curve:
-        loss, acc_val, acc_test, history = train(
-            lambda: make_adam(lr=1e-2),
-            steps=HYPERPARAMS["steps"],
-            sizes=HYPERPARAMS["sizes"],
-            seed=SEED,
-            data=data,
-            track=True,
-        )
-        logger.info(f"Adam 1x latih: loss={loss:.4f}, val={acc_val:.4f}, uji={acc_test:.4f}")
-        plot_training_curve(history, FIGURES_DIR / "kurva_training.png")
-
-    # --- 4 optimizers, same hyperparameters (section 18) ----------------------
-    rows, curves_bank, models_bank = [], {}, {}
-    for name, factory, _lr_str in OPTIMIZERS:
-        tr_loss, va_loss, tr_acc, va_acc, te_acc, curves, model = train_epochs(
-            factory,
+        r = train(
+            lambda: make_adam(lr=1e-3),
+            data,
             epochs=HYPERPARAMS["epochs"],
             batch_size=HYPERPARAMS["batch_size"],
             sizes=HYPERPARAMS["sizes"],
             init=HYPERPARAMS["init"],
             activation=HYPERPARAMS["activation"],
             seed=SEED,
-            data=data,
-            return_model=True,
         )
-        curves_bank[name] = curves
-        models_bank[name] = model
+        logger.info(
+            f"Adam 1x latih: loss={r.train_loss:.4f}, val={r.val_acc:.4f}, uji={r.test_acc:.4f}"
+        )
+        plot_training_curve(r.epoch_curves, FIGURES_DIR / "kurva_training.png")
+
+    # --- 4 optimizers, same hyperparameters (section 18) ----------------------
+    rows, curves_bank, models_bank = [], {}, {}
+    for name, factory, _lr_str in OPTIMIZERS:
+        r = train(
+            factory,
+            data,
+            epochs=HYPERPARAMS["epochs"],
+            batch_size=HYPERPARAMS["batch_size"],
+            sizes=HYPERPARAMS["sizes"],
+            init=HYPERPARAMS["init"],
+            activation=HYPERPARAMS["activation"],
+            seed=SEED,
+        )
+        curves_bank[name] = r.epoch_curves
+        models_bank[name] = r.model
+        preds = predict(r.model, data.Xte)
+        m = metric_summary(data.yte, preds)
         rows.append(
             {
                 "Optimizer": name,
-                "Train Loss": tr_loss,
-                "Val Loss": va_loss,
-                "Train Acc (%)": tr_acc * 100,
-                "Val Acc (%)": va_acc * 100,
-                "Test Acc (%)": te_acc * 100,
-                "Status": fit_status(tr_acc, va_acc, tr_loss, va_loss),
+                "Train Loss": r.train_loss,
+                "Val Loss": r.val_loss,
+                "Train Acc (%)": r.train_acc * 100,
+                "Val Acc (%)": r.val_acc * 100,
+                "Test Acc (%)": r.test_acc * 100,
+                "Bal. Acc (%)": m["balanced_accuracy"] * 100,
+                "Macro-F1 (%)": m["macro_f1"] * 100,
+                "Status": fit_status(r.train_acc, r.val_acc, r.train_loss, r.val_loss),
             }
         )
 
@@ -118,8 +124,6 @@ def main(
         raise typer.BadParameter(
             f"report_optimizer harus salah satu dari {list(models_bank)} (dapat '{report_optimizer}')"
         )
-    encoder = dataset_mod._label_encoder
-    classes = list(encoder.classes_) if encoder is not None else None
     text = report(
         models_bank[report_optimizer],
         Xval,
@@ -127,7 +131,7 @@ def main(
         Xte,
         yte,
         save_path=FIGURES_DIR / f"confusion_matrix_{report_optimizer.lower()}.png",
-        class_names=classes,
+        class_names=list(data.classes),
     )
     logger.info("Classification report:\n" + str(text))
     (REPORTS_DIR / f"classification_report_{report_optimizer.lower()}.txt").write_text(
@@ -141,7 +145,7 @@ def main(
         MODELS_DIR / "model.pkl",
         mean=scaler.mean_ if scaler is not None else None,
         scale=scaler.scale_ if scaler is not None else None,
-        classes=classes,
+        classes=list(data.classes),
         init=HYPERPARAMS["init"],
         activation=HYPERPARAMS["activation"],
     )

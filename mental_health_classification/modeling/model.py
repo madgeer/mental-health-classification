@@ -39,7 +39,7 @@ def init_layer(layer: nn.Linear, init: str = "he"):
         b.zero_()
 
 
-def get_activation(name):
+def _get_activation(name):
     options = {
         "relu": F.relu,
         "tanh": torch.tanh,
@@ -57,46 +57,37 @@ def get_activation(name):
 
 
 class MLP(nn.Module):
-    def __init__(self, sizes=(12, 64, 32, 10), init="he", seed=SEED, activation="relu"):
+    def __init__(self, sizes=(12, 128, 64, 10), init="he", seed=SEED, activation="relu"):
         super().__init__()
         torch.manual_seed(seed)  # for reproducibility
-        self.act = get_activation(activation)
-        self.activation_name = activation if isinstance(activation, str) else "custom"
+        self.act = _get_activation(activation)
         self.layers = nn.ModuleList(
             nn.Linear(n_in, n_out) for n_in, n_out in zip(sizes[:-1], sizes[1:])
         )
         for layer in self.layers:
             init_layer(layer, init)
-        # Flat parameter list for the manual optimizers below
-        self.params = [p for layer in self.layers for p in (layer.weight, layer.bias)]
+
+    @property
+    def params(self):
+        """Flat parameter list (in registration order) for autograd.grad / manual optimizers."""
+        return list(self.parameters())
 
     def forward(self, x):
-        """Return (logits, per-layer activations). No activation on the last layer."""
-        acts = [x]
-        h = x
-        for i, layer in enumerate(self.layers):
-            z = layer(h)
-            h = z if i == len(self.layers) - 1 else self.act(z)
-            acts.append(h)
-        return h, acts
-
-    def _compute_loss(self, logits, y):
-        return F.cross_entropy(logits, y)  # mean cross-entropy
+        """Return logits only; the last layer has no activation (softmax lives in cross_entropy)."""
+        for layer in self.layers[:-1]:
+            x = self.act(layer(x))
+        return self.layers[-1](x)
 
     def loss_and_grads(self, x, y):
         """Compute the loss and its gradients (used at every training step)."""
-        logits, _ = self.forward(x)
-        loss = self._compute_loss(logits, y)
-        grads = torch.autograd.grad(loss, self.params)
-        return loss.item(), list(grads)
+        loss = F.cross_entropy(self.forward(x), y)
+        return loss.item(), list(torch.autograd.grad(loss, self.params))
 
     @torch.no_grad()
     def loss(self, x, y):
-        logits, _ = self.forward(x)
-        return self._compute_loss(logits, y).item()
+        return F.cross_entropy(self.forward(x), y).item()
 
     @torch.no_grad()
     def accuracy(self, x, y):
-        logits, _ = self.forward(x)
-        preds = logits.argmax(dim=1)
+        preds = self.forward(x).argmax(dim=1)
         return (preds == y).float().mean().item()

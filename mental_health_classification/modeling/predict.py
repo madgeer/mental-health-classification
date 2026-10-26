@@ -15,13 +15,13 @@ import torch
 from tqdm import tqdm
 import typer
 
-from mental_health_classification import dataset as dataset_mod
 from mental_health_classification.config import (
     CSV_FILENAME,
     FEATURES,
     MODELS_DIR,
     PROCESSED_DATA_DIR,
     RAW_DATA_DIR,
+    SEED,
     TARGET,
 )
 from mental_health_classification.modeling.model import MLP
@@ -29,16 +29,10 @@ from mental_health_classification.modeling.model import MLP
 app = typer.Typer()
 
 
-def get_class_names() -> list[str] | None:
-    """Class names from the last load_data() call, or None if it never ran."""
-    encoder = dataset_mod._label_encoder
-    return list(encoder.classes_) if encoder is not None else None
-
-
 @torch.no_grad()
 def predict(model, X):
     """Return the predicted classes (0..9) for a tensor batch."""
-    return model.forward(X)[0].argmax(dim=1).cpu().numpy()
+    return model(X).argmax(dim=1).cpu().numpy()
 
 
 def metric_summary(y_true, y_pred):
@@ -128,7 +122,7 @@ def save_model(
 def load_model(path: Path = MODELS_DIR / "model.pkl"):
     """Rebuild a model saved by `save_model()`; return (model, bundle)."""
     bundle = torch.load(Path(path), weights_only=False)
-    model = MLP(tuple(bundle["sizes"]), bundle["init"], activation=bundle["activation"])
+    model = MLP(tuple(bundle["sizes"]), bundle["init"], SEED, bundle["activation"])
     model.load_state_dict(bundle["state_dict"])
     model.eval()
     return model, bundle

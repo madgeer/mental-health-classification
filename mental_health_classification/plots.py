@@ -68,18 +68,23 @@ def plot_correlation(df: pd.DataFrame, save_path: Path | None = None):
     return corr
 
 
-def plot_training_curve(history, save_path: Path | None = None):
-    """Validation-loss curve over `track=True` steps (notebook section 16)."""
+def plot_training_curve(epoch_curves: dict, save_path: Path | None = None):
+    """Training curves (train vs val loss/acc) over epochs (notebook section 16)."""
+    epochs_axis = range(1, len(epoch_curves["val_loss"]) + 1)
     plt.figure()
-    plt.plot(history)
-    plt.xlabel("Step")
-    plt.ylabel("Loss validasi")
-    plt.title("Kurva training (validasi)")
+    plt.plot(epochs_axis, epoch_curves["train_loss"], label="Train", color="#1f77b4", linewidth=2)
+    plt.plot(epochs_axis, epoch_curves["val_loss"], label="Val", color="#ff7f0e", linewidth=2)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Kurva training (train vs validasi)")
+    plt.legend(loc="upper right")
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     if save_path is not None:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path)
     plt.show()
+    return epoch_curves
 
 
 def plot_confusion_matrix(y_true, y_pred, class_names, save_path: Path | None = None):
